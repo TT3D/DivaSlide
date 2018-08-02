@@ -1,0 +1,324 @@
+//Current issues, direction output latches sometimes. pos[] is being used at the moment
+//to filter latched commands
+
+
+#include <Adafruit_NeoPixel.h>
+
+#ifdef __AVR__
+  #include <avr/power.h>
+#endif
+
+//NeoPixel Strand pin
+#define led_pin 8
+
+Adafruit_NeoPixel led_strip = Adafruit_NeoPixel(24, led_pin, NEO_RGBW + NEO_KHZ800);
+
+// IMPORTANT: To reduce NeoPixel burnout risk, add 1000 uF capacitor across
+// pixel power leads, add 300 - 500 Ohm resistor on first pixel's data input
+// and minimize distance between Arduino and first pixel.  Avoid connecting
+// on a live circuit...if you must, connect GND first.
+
+#include <Wire.h>
+#include "Adafruit_MPR121.h"
+
+//the number of pads being used in the slider
+#define N_SENSORS       48
+
+//The number of "0" that must be counted to detect the end of the first touched zone
+#define DEADZONE_MAX    3
+
+
+//Used for loops as a baseline number and comparison to detect no pins are touched
+#define NO_TOUCH        -1
+
+//Define the NeoPixel slider
+
+
+//Define the objects
+
+Adafruit_MPR121 mprA = Adafruit_MPR121();
+Adafruit_MPR121 mprB = Adafruit_MPR121();
+Adafruit_MPR121 mprC = Adafruit_MPR121();
+Adafruit_MPR121 mprD = Adafruit_MPR121();
+
+//Define the output pins to the PS4 controller board
+byte L1 = 4;
+byte R1 = 5;
+byte L2 = 6;
+byte R2 = 7;
+
+//Array for storing the sensor values
+int positionArray[N_SENSORS] = {};
+
+/*arrays for storing the values from the current touched and last touched pads
+in the read_sensors loop*/
+int lasttouched[4] = {};
+int currtouched[4] = {};
+
+//No touch flag used to clear direction data, 0 is no touch
+uint8_t no_touch = 0;
+
+/*Used for reading the sensor field, using this variable  allows for one
+multiplication per quadrant read instead of 12, adding speed*/
+byte sensorOffset;
+
+char strOut[N_SENSORS+2];
+
+char pos[2] = {NO_TOUCH, NO_TOUCH};
+char posPrev[2] = {NO_TOUCH, NO_TOUCH};
+char dir[2] = {0 ,0};    //1 right, -1 left, 0 no direction
+
+
+//The beginning and ends of each "touched zone"
+char startDetectPos;
+char endDetectPos;
+
+//stores the count of how many "0" have been read since startDetectPos
+byte zeroCount;
+
+void setup() {
+  
+  Serial.begin(2000000);
+
+  
+  //Set the output pins to output mode
+  pinMode(L1, OUTPUT);
+  pinMode(L2, OUTPUT);
+  pinMode(R1, OUTPUT);
+  pinMode(R2, OUTPUT);
+
+  //Output written high is off. Sets all outputs off as default
+  digitalWrite(L1, HIGH);  
+  digitalWrite(R1, HIGH);
+  digitalWrite(L2, HIGH);
+  digitalWrite(R2, HIGH);
+
+  //Start the MPR121 boards
+  //*****OUTPUTS REVERSED ON PROTOTYPE BOARD*****
+  mprD.begin(0x5A);
+  mprC.begin(0x5B);
+  mprB.begin(0x5C);
+  mprA.begin(0x5D);
+
+  led_strip.begin();
+  led_strip.show(); // Initialize all pixels to 'off'
+
+}
+
+void loop() {
+
+  clear_array();
+
+  read_sensors();
+
+  readPositions();
+
+  //runs the detection for each finger
+  direction_detection(0);
+  direction_detection(1);
+
+  send_output1(); 
+  send_output2(); 
+
+  //led_output();
+  
+  //Not needed for upload version, comment in to use the debug function
+  //debug();
+
+  //Delay is needed as the program runs too fast, slowing down to approx 60Hz
+  delay(16);
+}
+
+
+/*Set all array values to 0*/
+void clear_array (){
+
+  //Set all array values to 0
+  memset(positionArray, 0, sizeof(positionArray));
+  
+}
+
+
+/* Fills the 48 bit array with a 1 if a touch was detected at that "coordinate"*/
+void read_sensors (){
+
+
+  
+    // Read the data from all four sensors
+    currtouched[0] = mprA.touched();
+    currtouched[1] = mprB.touched();
+    currtouched[2] = mprC.touched();
+    currtouched[3] = mprD.touched();
+
+    //write the data from the sensors to the array
+
+    //starting at sensor 0 (A), write any touched values to the array as a "1"
+  for (byte sensor = 0; sensor < 4; sensor++) {
+    sensorOffset = 12 * sensor;
+    //Run this loop for 12 counts for the 12 values per sensor
+    for (byte i = 0; i < 12; i++) {
+
+       /****************************************************************
+        * if a pad is being touched, it will be indexed in the positionArray as a 1
+       add the following code " && !(lasttouched[sensor] & _BV(i))  to the end of
+       the line below and it will zero (0) out any pads being held
+       ****************************************************************/
+       if (currtouched[sensor] & _BV(i)) {
+        
+          //writes the one (1) values to the array + offset
+          positionArray[i + sensorOffset] = 1;
+          
+      }    
+    }
+    //comment out if using lasttouched functionality
+    //lasttouched[sensor] = currtouched[sensor];
+  }
+}
+
+
+/*Reads the array and looks for two groups of "1". When it finds the first group it
+will average the central position and store it and move to finding the central point
+of the second finger. only two fingers are calculated and any extra are not calculated
+ */
+void readPositions(){
+
+    
+  positionDetection(0);
+
+  if(startDetectPos > 0){
+    pos[0] = (startDetectPos + endDetectPos) >> 1;
+
+    positionDetection(endDetectPos + DEADZONE_MAX);
+    if(startDetectPos > 0){
+      pos[1] = (startDetectPos + endDetectPos) >> 1;
+    }else{
+      pos[1] = -1;
+    }
+  }else{
+    pos[0] = -1;
+  }
+}
+
+
+/*An internal function of readPositions which is responsible for the array scanning
+and deadzone detection*/
+void positionDetection(byte scanOffset){    //scanOffset is start index of detection algorithm
+
+
+
+ 
+  //a state of -1 means no touch and skips loops
+  startDetectPos = -1;
+  endDetectPos = -1;
+  
+  //reset number of deadzone "0" to 0
+  zeroCount = 0;
+
+  //Reads data until the first "1" is found and then goes to the else statement
+  for(byte i=scanOffset; i<N_SENSORS; i++){
+    if(startDetectPos < 0){         //look for touch start position
+      if(positionArray[i] != 0){
+        startDetectPos = i;
+      }
+
+    /*looks for three "0" to define the deadzone, this allows a stuck pad reading "0" constantly
+    to not cause a single touch to register as two. when it finds the deadzone it marks the end*/  
+    }else{        
+      if(endDetectPos < 0){         //look for touch end position
+        if(positionArray[i] == 0){
+          zeroCount++;
+          if(zeroCount >= DEADZONE_MAX){
+            endDetectPos = i - DEADZONE_MAX;
+            break;
+          }
+        }else{
+          zeroCount = 0;
+        }
+      }
+    }
+  }
+  if(endDetectPos < 0){           //if no end detection was found,
+    endDetectPos = N_SENSORS-1;   //set end position at end of array
+  }
+}
+
+
+/*This function takes the coordinates from readPositions and calculates the direction of
+each finger as either Left (-1), Right (1), or no movement (0)*/
+void direction_detection(byte i) {
+  if((pos[i] > 0) && (posPrev[i] < 0)){
+    posPrev[i] = pos[i];
+  }
+  //compares the current position to the last recorded position
+  if(pos[i] > 0){
+    if(pos[i] > posPrev[i]){
+      dir[i] = 1;
+    }else if(pos[i] < posPrev[i]){
+      dir[i] = -1;
+    }else{
+      dir[i] = 0;
+    }
+  }
+  //sets the current position to the last for the next loop to compare to
+  posPrev[i] = pos[i];  
+}
+
+
+/*Takes the data from direction_detection and outputs it to the L1,R1,L2, and R2 pins*/
+void send_output1() {
+  if(pos[0] < 0){
+    digitalWrite(R1, HIGH);
+    digitalWrite(L1, HIGH);
+
+  }else if(dir[0] > 0){
+    digitalWrite(R1, LOW);
+    Serial.print((int)dir[0]);
+
+  }else if(dir[0] < 0){
+    digitalWrite(L1, LOW);
+    Serial.print((int)dir[0]);
+
+  }  
+}
+
+void send_output2() {
+  if(pos[1] < 0){
+    digitalWrite(R2, HIGH);
+    digitalWrite(L2, HIGH);
+  }else if(dir[1] > 0){
+    digitalWrite(R2, LOW);
+  }else if(dir[1] < 0){
+    digitalWrite(L2, LOW);
+  }
+}
+
+
+void led_output() {
+
+}
+
+/***************************************************************
+This area is for serial pringing and other "debug code" to keep it seperate
+in its own function so the program does not slow when testing. It may be
+necessary to add debug code in other locations for testing so make sure to
+keep the code clean by removing or commenting out afterwards.
+****************************************************************/
+void debug(){
+
+  
+  for(int i = 0; i < N_SENSORS; i++) {
+    strOut[i] = positionArray[i] ? '1' : '0';
+  }
+  Serial.print(strOut);
+  Serial.print('\t');
+  Serial.print((int)pos[0]);
+  Serial.print('\t');
+  Serial.print((int)dir[0]);
+  Serial.print('\t');
+  Serial.print((int)pos[1]);
+  Serial.print('\t');
+  Serial.println((int)dir[1]);
+  
+}
+
+
