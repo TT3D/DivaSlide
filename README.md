@@ -4,6 +4,13 @@ The goal of this project is to be an open source touch slider for Project DIVA F
 
 This project is based on the NXP semiconductors MPR121 capacitive touch sensor and the ATMEGA328 series of microprocessors. The hardware design is open source and will be updated as I progress further.
 
+
+This code requires the following Arduino Libraries:
+https://github.com/adafruit/Adafruit_MPR121
+https://github.com/adafruit/Adafruit_NeoPixel
+
+
+
 Current functionality:
 up to four (4) MPR121 IC's can be interpreted for a 48 part touch slider
 Outputs single left, single right, double left, double right, and single opposing slides
